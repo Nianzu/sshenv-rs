@@ -1,0 +1,16 @@
+# Git accounts that `git account` offers (git config syntax).
+#   name, email  commit identity
+#   key          public key file, relative to this folder or absolute
+#                (required). ssh and commit signing use the matching key in
+#                your agent.
+# Account names: letters, digits, '-' and '_' only.
+
+[account "work"]
+    name = nico
+    email = nico@navflex.com
+    key = keys/work.pub
+
+[account "personal"]
+    name = nianzu
+    email = nazucca7@gmail.com
+    key = keys/personal.pub

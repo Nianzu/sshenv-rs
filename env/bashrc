@@ -1,0 +1,18 @@
+# Shell setup on a remote reached with sshenv, which starts:
+#     bash --rcfile "$SSHENV_DIR/bashrc" -i
+# That replaces ~/.bashrc, so first load the usual files to keep the remote's
+# normal behavior, then add our environment on top. Everything here lives
+# only in this shell; the remote's files and other users are untouched.
+
+[ -r /etc/profile ] && . /etc/profile
+[ -r ~/.bashrc ]    && . ~/.bashrc
+
+export PATH="$SSHENV_DIR/bin:$PATH"
+
+# git: each command gets the repo's account (see bin/git-account).
+git() { git-account git "$@"; }
+
+# vim reads $VIMINIT instead of ~/.vimrc. Covers vi, vim, and git's editor.
+[ -r "$SSHENV_DIR/vimrc" ] && export VIMINIT="source $SSHENV_DIR/vimrc"
+
+[ -r "$SSHENV_DIR/aliases" ] && . "$SSHENV_DIR/aliases"

@@ -1,0 +1,204 @@
+#!/bin/sh
+# git-account - use the right git account (name, email, ssh key) in each repo,
+# without changing the repo or anyone else's git setup.
+#
+#   git account              show this repo's account, or ask for one
+#   git account NAME         use account NAME in this repo
+#   git account --clear      forget this repo's account
+#   git account --list       list the accounts
+#
+# Your shell sends git commands through this script (see bashrc):
+#     git() { git-account git "$@"; }
+# In a repo with an account, the account's settings are added to that one
+# git command through GIT_CONFIG_* environment variables. Those override every
+# config file and are gone when the command ends; nothing is written to the
+# repo. In a repo without one, commands that need an identity or a key
+# (clone, fetch, pull, push, commit, ...) ask first. Everything else runs as
+# plain git.
+#
+# Choices are kept in one file, a line "ACCOUNT PATH" per repo (the last line
+# for a path wins). On a remote it lives in the sshenv temp dir, and sshenv
+# copies it to and from your laptop. On the laptop it is
+# ~/.local/state/sshenv/local.
+
+set -eu
+
+DIR=${SSHENV_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/sshenv}
+ACCOUNTS=$DIR/accounts
+if [ -n "${SSHENV_DIR:-}" ]; then
+    CHOICES=$SSHENV_DIR/state/repos
+else
+    CHOICES=${XDG_STATE_HOME:-$HOME/.local/state}/sshenv/local
+fi
+
+die() { echo "git-account: $*" >&2; exit 1; }
+
+[ -r "$ACCOUNTS" ] || die "no accounts file at $ACCOUNTS"
+
+# Account names, one per line.
+names() {
+    git config -f "$ACCOUNTS" --name-only --get-regexp '^account\..*\.email$' |
+        sed 's/^account\.//; s/\.email$//'
+}
+
+# field ACCOUNT FIELD: print account.ACCOUNT.FIELD (name, email or key).
+field() { git config -f "$ACCOUNTS" "account.$1.$2"; }
+
+# keyfile ACCOUNT: print the path of the account's public key file.
+keyfile() {
+    k=$(field "$1" key) || die "account '$1' has no key in $ACCOUNTS"
+    case $k in /*) echo "$k" ;; *) echo "$DIR/$k" ;; esac
+}
+
+# toplevel DIR: print the top folder of the repo containing DIR, or nothing.
+toplevel() { (cd "$1" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null) || true; }
+
+# chosen TOPLEVEL: print the account chosen for that repo, or nothing.
+chosen() {
+    a=""
+    if [ -r "$CHOICES" ]; then
+        while read -r account path; do
+            if [ "$path" = "$1" ]; then a=$account; fi
+        done <"$CHOICES"
+    fi
+    if [ "$a" != "-" ]; then echo "$a"; fi   # "-" means forgotten
+}
+
+# remember ACCOUNT TOPLEVEL
+remember() {
+    mkdir -p "$(dirname "$CHOICES")"
+    printf '%s %s\n' "$1" "$2" >>"$CHOICES"
+}
+
+# ask WHAT: ask on the terminal which account to use for WHAT; print the name.
+ask() {
+    ( true <>/dev/tty ) 2>/dev/null ||
+        die "no account chosen for $1 and no terminal to ask on. Run: git account NAME"
+    exec 3<>/dev/tty
+    echo "git-account: which account for $1?" >&3
+    i=0
+    for n in $(names); do
+        i=$((i + 1))
+        echo "  $i) $n <$(field "$n" email)>" >&3
+    done
+    printf 'number or name: ' >&3
+    read -r reply <&3
+    i=0
+    for n in $(names); do
+        i=$((i + 1))
+        if [ "$reply" = "$i" ] || [ "$reply" = "$n" ]; then echo "$n"; return; fi
+    done
+    die "no such account: $reply"
+}
+
+# apply ACCOUNT: add the account's settings to the git config of this process
+# (and so of the git command it runs). Existing GIT_CONFIG_* entries are kept.
+apply() {
+    k=$(keyfile "$1")
+    n=${GIT_CONFIG_COUNT:-0}
+    add user.name "$(field "$1" name)"
+    add user.email "$(field "$1" email)"
+    add user.signingkey "key::$(awk '{print $1" "$2}' "$k")"
+    add gpg.format ssh
+    add gpg.ssh.program ssh-keygen
+    add commit.gpgsign true
+    # -i with a .pub file: use the agent's key that matches it.
+    add core.sshCommand "ssh -o IdentitiesOnly=yes -i '$k'"
+    add url.git@github.com:.insteadOf https://github.com/
+    export GIT_CONFIG_COUNT="$n"
+}
+add() {
+    export "GIT_CONFIG_KEY_$n=$1" "GIT_CONFIG_VALUE_$n=$2"
+    n=$((n + 1))
+}
+
+# run_git ARGS: run "git ARGS" with the account of the repo it works in.
+run_git() {
+    # Find the subcommand, and the folder git will work in (-C options).
+    dir=. sub="" next=""
+    for arg; do
+        case $next in
+        C) case $arg in /*) dir=$arg ;; *) dir=$dir/$arg ;; esac ;;
+        esac
+        if [ -n "$next" ]; then next=""; continue; fi
+        case $arg in
+        -C | -c) next=${arg#-} ;;
+        -*) ;;
+        *) sub=$arg; break ;;
+        esac
+    done
+
+    case $sub in
+    account) exec git "$@" ;;     # git runs this script for `git account`
+    clone) clone "$dir" "$@" ;;
+    esac
+
+    top=$(toplevel "$dir")
+    a=""
+    if [ -n "$top" ]; then a=$(chosen "$top"); fi
+    if [ -z "$a" ] && [ -n "$top" ]; then
+        case $sub in
+        fetch | pull | push | commit | merge | rebase | cherry-pick | revert | am | tag)
+            a=$(ask "$(basename "$top")")
+            remember "$a" "$top"
+            ;;
+        esac
+    fi
+    if [ -n "$a" ]; then apply "$a"; fi
+    exec git "$@"
+}
+
+# clone DIR ARGS: ask first, clone with that account, then remember it for
+# the new repo (the new folder in DIR; a clone to elsewhere asks again later).
+clone() {
+    dir=$1
+    shift
+    a=$(ask "the new clone")
+    apply "$a"
+    marker=$(mktemp)
+    status=0
+    git "$@" || status=$?
+    find "$dir" -mindepth 1 -maxdepth 1 -type d -newer "$marker" |
+        while read -r d; do
+            if [ -d "$d/.git" ]; then remember "$a" "$(toplevel "$d")"; fi
+        done
+    rm -f "$marker"
+    exit "$status"
+}
+
+case ${1:-} in
+git)
+    shift
+    run_git "$@"
+    ;;
+--list)
+    for n in $(names); do echo "$n <$(field "$n" email)>"; done
+    ;;
+-h | --help)
+    sed -n '2,8s/^# \{0,1\}//p' "$0"
+    ;;
+-*)
+    case $1 in --clear) ;; *) die "unknown option: $1 (see --help)" ;; esac
+    top=$(toplevel .)
+    [ -n "$top" ] || die "not in a git repository"
+    remember - "$top"
+    echo "git-account: $(basename "$top") has no account now"
+    ;;
+"")
+    top=$(toplevel .)
+    [ -n "$top" ] || die "not in a git repository"
+    a=$(chosen "$top")
+    if [ -z "$a" ]; then
+        a=$(ask "$(basename "$top")")
+        remember "$a" "$top"
+    fi
+    echo "$a <$(field "$a" email)>"
+    ;;
+*)
+    top=$(toplevel .)
+    [ -n "$top" ] || die "not in a git repository"
+    field "$1" email >/dev/null || die "no account '$1' in $ACCOUNTS"
+    remember "$1" "$top"
+    echo "git-account: $(basename "$top") now uses '$1' <$(field "$1" email)>"
+    ;;
+esac

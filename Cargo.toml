@@ -1,0 +1,11 @@
+[package]
+name = "sshenv"
+version = "0.2.0"
+edition = "2021"
+description = "ssh to a host and bring your environment along"
+
+# None, on purpose: standard library only, so everything to audit is in src/.
+[dependencies]
+
+[profile.release]
+strip = true
