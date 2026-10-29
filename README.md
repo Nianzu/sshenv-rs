@@ -1,3 +1,4 @@
+// AI GENERATED
 # sshenv
 
 `sshenv host` logs in like `ssh host`, but brings your environment along:
